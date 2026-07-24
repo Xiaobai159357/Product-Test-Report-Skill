@@ -61,7 +61,7 @@ dependency:
 
 - 示例2: 完整参数
   - 场景/输入: 用户需要精确控制报告中的所有元数据
-  - 调用: `python scripts/generate_report.py --testcase ./用例.xlsx --template assets/template.docx --output ./报告.docx --executor "李四" --company "华苏" --browser "Chrome" --account "admin/123" --start-time "20:00" --end-time "22:00" --report-no "自主开发-能耗系统-20260123" --requirement "需求：运维费用批量生效失效功能"`
+  - 调用: `python scripts/generate_report.py --testcase ./用例.xlsx --template assets/template.docx --output ./报告.docx --executor "李四" --company "公司" --browser "Chrome" --account "admin/123" --start-time "20:00" --end-time "22:00" --report-no "报告标题" --requirement "需求：运维费用批量生效失效功能"`
   - 预期产出: 所有元数据按用户指定值填充的报告
   - 关键要点: 所有可选参数均可覆盖自动提取的值
 
