@@ -1,0 +1,5 @@
+# 用旧模板（默认）
+python generate_report.py --testcase "用例.xlsx" --template "template.docx" --output "报告.docx"
+
+# 用新模板（手动指定）
+python generate_report.py --testcase "用例.xlsx" --template "新模板.docx" --output "报告.docx"
