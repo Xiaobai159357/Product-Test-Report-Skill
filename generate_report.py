@@ -27,6 +27,8 @@ except ImportError:
 try:
     from docx import Document
     from docx.oxml.ns import qn
+    from docx.shared import Cm, Inches
+    from docx.text.paragraph import Paragraph
     from lxml import etree
 except ImportError:
     print("Error: python-docx is required. Install with: pip install python-docx", file=sys.stderr)
@@ -64,9 +66,11 @@ def parse_testcase_file(filepath):
             os.remove(tmp_file)
 
     ws = wb.active
+    headers = [cell.value for cell in list(ws.iter_rows(min_row=1, max_row=1))[0]]
+    col_map = _build_column_map(headers)
     testcases = []
     for row in ws.iter_rows(min_row=2, values_only=True):
-        tc = _build_testcase(row)
+        tc = _build_testcase(row, col_map)
         if tc:
             testcases.append(tc)
     return testcases
@@ -76,19 +80,64 @@ def _parse_xls_with_xlrd(filepath):
     import xlrd
     wb = xlrd.open_workbook(filepath)
     ws = wb.sheet_by_index(0)
+    headers = [ws.cell_value(0, c) for c in range(ws.ncols)]
+    col_map = _build_column_map(headers)
     testcases = []
     for row_idx in range(1, ws.nrows):
         row = [ws.cell_value(row_idx, c) for c in range(ws.ncols)]
-        tc = _build_testcase(row)
+        tc = _build_testcase(row, col_map)
         if tc:
             testcases.append(tc)
     return testcases
 
 
-def _build_testcase(row):
-    if not row or not row[0]:
+def _build_column_map(headers):
+    """依据表头文字自动识别各字段对应的列索引，兼容不同列顺序与列数量。"""
+    col_map = {}
+    rules = {
+        "name": ["用例名称", "用例"],
+        "precondition": ["前置条件", "前置"],
+        "description": ["描述", "说明"],
+        "priority": ["优先级", "优先", "级别"],
+        "steps": ["测试步骤", "操作步骤", "步骤", "操作"],
+        "expected": ["预期结果", "期望结果", "预期"],
+        "case_type": ["用例类型", "类型"],
+        "verify_type": ["上线后验证", "验证类型", "验证"],
+    }
+    for idx, h in enumerate(headers):
+        if h is None:
+            continue
+        h_str = str(h).strip()
+        for field, keywords in rules.items():
+            for kw in keywords:
+                if kw in h_str and field not in col_map:
+                    col_map[field] = idx
+                    break
+    defaults = {"name": 0, "precondition": 1, "description": 2, "priority": 3,
+                "steps": 4, "expected": 5, "case_type": 6, "verify_type": 7}
+    for field, idx in defaults.items():
+        col_map.setdefault(field, idx)
+    return col_map
+
+
+def _build_testcase(row, col_map=None):
+    if not row:
         return None
-    full_name = str(row[0]).strip()
+    if col_map is None:
+        col_map = {"name": 0, "precondition": 1, "description": 2, "priority": 3,
+                   "steps": 4, "expected": 5, "case_type": 6, "verify_type": 7}
+
+    def get_field(field):
+        idx = col_map.get(field)
+        if idx is None or idx >= len(row):
+            return None
+        val = row[idx]
+        if val is None:
+            return None
+        s = str(val).strip()
+        return s if s else None
+
+    full_name = get_field("name")
     if not full_name:
         return None
 
@@ -101,22 +150,24 @@ def _build_testcase(row):
     m = re.search(r'【(项目组验证|地市验证|不具备验证条件)】', full_name)
     if m:
         verify_type = m.group(1)
-    elif len(row) > 7 and row[7]:
-        verify_type = str(row[7]).strip()
+    else:
+        vt = get_field("verify_type")
+        if vt:
+            verify_type = vt
 
     clean_name = re.sub(r'【[^】]*】', '', full_name).strip()
 
-    priority_raw = str(row[3]).strip() if len(row) > 3 and row[3] else "中"
+    priority_raw = get_field("priority") or "中"
     priority_map = {"高": "高级", "中": "中级", "低": "低级"}
 
     return {
         "full_name": full_name,
         "name": clean_name,
-        "precondition": str(row[1]).strip() if len(row) > 1 and row[1] else "",
-        "description": str(row[2]).strip() if len(row) > 2 and row[2] else "",
+        "precondition": get_field("precondition") or "",
+        "description": get_field("description") or "",
         "priority": priority_map.get(priority_raw, "中级"),
-        "steps": str(row[4]).strip() if len(row) > 4 and row[4] else "",
-        "expected": str(row[5]).strip() if len(row) > 5 and row[5] else "",
+        "steps": get_field("steps") or "",
+        "expected": get_field("expected") or "",
         "case_type": "功能用例",
         "verify_type": verify_type or "项目组验证",
         "date_tag": date_tag,
@@ -212,35 +263,77 @@ def set_paragraph_text(para_elem, text):
 
 
 def set_cell_text_simple(cell, text):
-    """设置单元格文本，字体统一为宋体小四"""
-    from docx.shared import Pt
+    """设置单元格文本，字体统一为宋体小四，支持\\n换行"""
+    from docx.oxml import OxmlElement
+    # 处理换行：将文本按\\n分割
+    lines = text.split('\n') if '\n' in text else [text]
+    
     for para in cell.paragraphs:
-        runs = list(para.runs)
-        if not runs:
-            run = para.add_run(text)
-            run.font.name = '宋体'
-            run.font.size = Pt(12)
-            _set_run_font_xml(run._element)
-            return
-        # 清除所有run的文本
-        for run in runs:
-            run.text = ""
-        # 删除多余的run，只保留第一个
-        for run in runs[1:]:
-            run._element.getparent().remove(run._element)
-        # 在第一个run上设置文本和字体
-        first_run = runs[0]
-        first_run.text = text
-        first_run.font.name = '宋体'
-        first_run.font.size = Pt(12)
-        _set_run_font_xml(first_run._element)
+        # 清除段落中所有现有的runs
+        p_elem = para._element
+        for run_elem in list(p_elem.findall(qn('w:r'))):
+            p_elem.remove(run_elem)
+        
+        # 完全用XML方式添加内容，避免add_run()导致顺序错乱
+        for i, line in enumerate(lines):
+            if i > 0:
+                # 添加换行run（只包含<w:br/>）
+                br_run = OxmlElement('w:r')
+                br_elem = OxmlElement('w:br')
+                br_run.append(br_elem)
+                p_elem.append(br_run)
+            
+            # 添加文本run
+            run = OxmlElement('w:r')
+            rpr = OxmlElement('w:rPr')
+            rfonts = OxmlElement('w:rFonts')
+            rfonts.set(qn('w:ascii'), '宋体')
+            rfonts.set(qn('w:eastAsia'), '宋体')
+            rfonts.set(qn('w:hAnsi'), '宋体')
+            rpr.append(rfonts)
+            sz = OxmlElement('w:sz')
+            sz.set(qn('w:val'), '24')
+            rpr.append(sz)
+            sz_cs = OxmlElement('w:szCs')
+            sz_cs.set(qn('w:val'), '24')
+            rpr.append(sz_cs)
+            run.append(rpr)
+            t = OxmlElement('w:t')
+            t.set(qn('xml:space'), 'preserve')
+            t.text = line
+            run.append(t)
+            p_elem.append(run)
+        
         return
+    
     # 如果没有段落，创建一个
     para = cell.add_paragraph()
-    run = para.add_run(text)
-    run.font.name = '宋体'
-    run.font.size = Pt(12)
-    _set_run_font_xml(run._element)
+    p_elem = para._element
+    for i, line in enumerate(lines):
+        if i > 0:
+            br_run = OxmlElement('w:r')
+            br_elem = OxmlElement('w:br')
+            br_run.append(br_elem)
+            p_elem.append(br_run)
+        run = OxmlElement('w:r')
+        rpr = OxmlElement('w:rPr')
+        rfonts = OxmlElement('w:rFonts')
+        rfonts.set(qn('w:ascii'), '宋体')
+        rfonts.set(qn('w:eastAsia'), '宋体')
+        rfonts.set(qn('w:hAnsi'), '宋体')
+        rpr.append(rfonts)
+        sz = OxmlElement('w:sz')
+        sz.set(qn('w:val'), '24')
+        rpr.append(sz)
+        sz_cs = OxmlElement('w:szCs')
+        sz_cs.set(qn('w:val'), '24')
+        rpr.append(sz_cs)
+        run.append(rpr)
+        t = OxmlElement('w:t')
+        t.set(qn('xml:space'), 'preserve')
+        t.text = line
+        run.append(t)
+        p_elem.append(run)
 
 
 def _set_run_font_xml(run_elem):
@@ -599,7 +692,7 @@ def _fill_table_xml(table_elem, tc, template_type):
 
 
 def _set_row_cell_text(row_elem, col_idx, text):
-    """设置行中指定列的文本"""
+    """设置行中指定列的文本，支持\\n换行"""
     cells = row_elem.findall(qn('w:tc'))
     if col_idx >= len(cells):
         return
@@ -608,36 +701,33 @@ def _set_row_cell_text(row_elem, col_idx, text):
     if not paras:
         return
     para = paras[0]
-    runs = para.findall(qn('w:r'))
-    if not runs:
-        return
-    first_run = runs[0]
-    for run in runs[1:]:
-        para.remove(run)
-    t = first_run.find(qn('w:t'))
-    if t is None:
-        t = etree.SubElement(first_run, qn('w:t'))
-    t.set(qn('xml:space'), 'preserve')
-    t.text = text
-    # 设置字体
-    rpr = first_run.find(qn('w:rPr'))
-    if rpr is None:
-        rpr = etree.SubElement(first_run, qn('w:rPr'), attrib={})
-        first_run.insert(0, rpr)
-    rfonts = rpr.find(qn('w:rFonts'))
-    if rfonts is None:
+    # 清除段落中所有现有的runs
+    for run_elem in list(para.findall(qn('w:r'))):
+        para.remove(run_elem)
+    
+    # 处理换行：将文本按\n分割
+    lines = text.split('\n') if '\n' in text else [text]
+    
+    for i, line in enumerate(lines):
+        if i > 0:
+            # 添加换行run（只包含<w:br/>）
+            br_run = etree.SubElement(para, qn('w:r'))
+            br_elem = etree.SubElement(br_run, qn('w:br'))
+        
+        # 添加文本run
+        run = etree.SubElement(para, qn('w:r'))
+        rpr = etree.SubElement(run, qn('w:rPr'))
         rfonts = etree.SubElement(rpr, qn('w:rFonts'))
-    rfonts.set(qn('w:ascii'), '宋体')
-    rfonts.set(qn('w:eastAsia'), '宋体')
-    rfonts.set(qn('w:hAnsi'), '宋体')
-    sz = rpr.find(qn('w:sz'))
-    if sz is None:
+        rfonts.set(qn('w:ascii'), '宋体')
+        rfonts.set(qn('w:eastAsia'), '宋体')
+        rfonts.set(qn('w:hAnsi'), '宋体')
         sz = etree.SubElement(rpr, qn('w:sz'))
-    sz.set(qn('w:val'), '24')
-    sz_cs = rpr.find(qn('w:szCs'))
-    if sz_cs is None:
+        sz.set(qn('w:val'), '24')
         sz_cs = etree.SubElement(rpr, qn('w:szCs'))
-    sz_cs.set(qn('w:val'), '24')
+        sz_cs.set(qn('w:val'), '24')
+        t = etree.SubElement(run, qn('w:t'))
+        t.set(qn('xml:space'), 'preserve')
+        t.text = line
 
 
 def update_summary(doc, project_info, testcases, template_type):
@@ -672,6 +762,48 @@ def update_summary(doc, project_info, testcases, template_type):
 # 6. 主流程
 # ---------------------------------------------------------------------------
 
+def _find_image_file(screenshots_dir, seq):
+    """在截图目录中查找指定序号(seq)的图片文件"""
+    extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']
+    for ext in extensions:
+        path = os.path.join(screenshots_dir, f"{seq}{ext}")
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def insert_screenshots(doc, testcases, screenshots_dir):
+    """在每个测试用例的"测试截图"段落后批量插入对应用例序号的照片"""
+    from docx.oxml.ns import qn as _qn
+    body = doc.element.body
+    # 收集所有"测试截图："段落元素（按出现顺序）
+    screenshot_paras = []
+    for child in body:
+        tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+        if tag == 'p':
+            text = get_paragraph_text(child)
+            if '测试截图' in text:
+                screenshot_paras.append(child)
+
+    inserted = 0
+    for idx, para_elem in enumerate(screenshot_paras):
+        seq = idx + 1  # 用例序号从1开始，与测试用例索引对应
+        image_path = _find_image_file(screenshots_dir, seq)
+        if image_path is None:
+            continue
+        try:
+            # 用doc.add_paragraph创建（python-docx oxml元素，支持add_run/add_picture），再移动到截图段落后
+            new_para = doc.add_paragraph()
+            run = new_para.add_run()
+            run.add_picture(image_path, width=Cm(14))
+            para_elem.addnext(new_para._p)
+            inserted += 1
+        except Exception as e:
+            print(f"插入截图 {seq} 失败: {e}", file=sys.stderr)
+
+    print(json.dumps({"status": "success", "inserted_screenshots": inserted}, ensure_ascii=False))
+
+
 def generate_report(testcase_file, template_file, output_file, args):
     testcases = parse_testcase_file(testcase_file)
     if not testcases:
@@ -697,6 +829,11 @@ def generate_report(testcase_file, template_file, output_file, args):
 
     # 生成测试用例条目
     generate_testcase_elements(doc, testcases, template_type)
+
+    # 批量插入截图
+    screenshots_dir = getattr(args, 'screenshots_dir', '')
+    if screenshots_dir and os.path.isdir(screenshots_dir):
+        insert_screenshots(doc, testcases, screenshots_dir)
 
     # 更新测试总结
     update_summary(doc, project_info, testcases, template_type)
@@ -728,6 +865,7 @@ def main():
     parser.add_argument('--account', default='', help='测试账号')
     parser.add_argument('--start-time', default='', help='开始时间')
     parser.add_argument('--end-time', default='', help='结束时间')
+    parser.add_argument('--screenshots-dir', default='', help='截图文件夹路径，图片按用例序号命名(1.jpg, 2.png...)')
 
     args = parser.parse_args()
 
