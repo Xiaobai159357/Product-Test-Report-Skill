@@ -51,6 +51,7 @@ dependency:
   - `--write-date`: 编写日期，默认当天(格式 YYYY.MM.DD)
   - `--requirement`: 需求描述，默认从文件名提取功能名称
   - `--title`: 报告标题，默认从文件名生成
+  - `--screenshots-dir`: 截图目录路径。若需要给每条测试用例插入截图，按用例序号命名图片(如 `1.jpg`、`2.png`，对应第1、2条用例)，每张截图会插入到对应"测试截图：用例标题"段落的下一行。未提供此参数则不插入截图。
 
 ## 使用示例
 - 示例1: 基础用法
@@ -70,6 +71,12 @@ dependency:
   - 调用: `python scripts/generate_report.py --testcase ./用例.xls --template assets/template.docx --output ./报告.docx --executor "王五"`
   - 预期产出: 按内置模板格式生成的报告
   - 关键要点: assets/template.docx 是标准上线后验证报告模板
+    
+- 示例4: 插入测试截图
+  - 场景/输入: 用户需要为每条测试用例插入执行截图，图片按用例序号命名(1.jpg、2.png...对应第1、2条用例)
+  - 调用: `python scripts/generate_report.py --testcase ./用例.xlsx --template ./模板.docx --output ./报告.docx --executor "张三" --company "XX公司" --screenshots-dir ./截图目录`
+  - 预期产出: 每条用例的"测试截图：用例标题"段落下一行插入对应编号的截图
+  - 关键要点: 截图目录中的图片名必须与用例序号严格对应；通常每用例1张；不提供 --screenshots-dir 则不插入截图
 
 ## 资源索引
 - 脚本: 见 [scripts/generate_report.py](scripts/generate_report.py)(用途: 解析测试用例文件并生成 docx 报告，参数见操作步骤)
